@@ -1,0 +1,15 @@
+package me.chr.hex4j.core.R.Response;
+
+import lombok.Getter;
+
+/**
+ * @Author: CHR
+ * @Date: create in 2025/11/28
+ */
+public class BizException extends RuntimeException{
+
+    public BizException(String msg) {
+        super(msg);
+    }
+
+}

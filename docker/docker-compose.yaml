@@ -1,0 +1,111 @@
+name: ${APP_NAME:-hex4j}
+
+services:
+  # PostgreSQL 数据库服务
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16.2-alpine}
+    environment:
+      - 'POSTGRES_DB=${POSTGRES_DB:-mydatabase}'
+      - 'POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secret}'
+      - 'POSTGRES_USER=${POSTGRES_USER:-myuser}'
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - './postgres/data:/var/lib/postgresql/data'
+    networks:
+      - 'hex4j-network'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-myuser} -d ${POSTGRES_DB:-mydatabase}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # RabbitMQ 消息队列服务
+  rabbitmq:
+    image: ${RABBITMQ_IMAGE:-rabbitmq:3.13.1-management-alpine}
+    environment:
+      - 'RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-secret}'
+      - 'RABBITMQ_DEFAULT_USER=${RABBITMQ_USERNAME:-myuser}'
+    ports:
+      - '${RABBITMQ_PORT:-5672}:5672'
+      - '${RABBITMQ_MANAGEMENT_PORT:-15672}:15672'
+    volumes:
+      - './rabbitmq/data:/var/lib/rabbitmq'
+    networks:
+      - 'hex4j-network'
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 1. 启动 Jaeger (用来展示链路图)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - '${JAEGER_UI_PORT:-16686}:16686' # Jaeger 的 Web 界面端口
+      - '${JAEGER_COLLECTOR_PORT:-14250}:14250' # Collector 发送数据给 Jaeger 的端口
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_KEY=/badger/key
+      - BADGER_DIRECTORY_VALUE=/badger/data
+    volumes:
+      - ./jaeger/data:/badger
+    networks:
+      - 'hex4j-network'
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider http://localhost:16686/ 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 2. 启动 OpenTelemetry Collector (用来收数据)
+  collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: [ "--config=/etc/otelcol/config.yaml" ]
+    ports:
+      - '${COLLECTOR_GRPC_PORT:-4317}:4317' # 接收探针数据的 gRPC 端口
+      - '${COLLECTOR_HTTP_PORT:-4318}:4318' # 接收探针数据的 HTTP 端口
+    volumes:
+      - ./opentelemetry/config.yaml:/etc/otelcol/config.yaml
+    depends_on:
+      - jaeger # 确保 Jaeger 先启动
+    networks:
+      - 'hex4j-network'
+
+  # Hex4j 应用服务
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - '${APP_PORT:-8080}:8080'
+    environment:
+      - 'SPRING_DATASOURCE_URL=jdbc:postgresql://${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hex}'
+      - 'SPRING_DATASOURCE_USERNAME=${POSTGRES_USER:-admin}'
+      - 'SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:-admin123456}'
+      - 'SPRING_RABBITMQ_HOST=${RABBITMQ_HOST:-rabbitmq}'
+      - 'SPRING_RABBITMQ_PORT=${RABBITMQ_PORT:-5672}'
+      - 'SPRING_RABBITMQ_USERNAME=${RABBITMQ_USERNAME:-admin}'
+      - 'SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-admin123456}'
+      - 'LOG_PATH=${LOG_PATH:-/app/logs}'
+      - 'JAVA_OPTS=${APP_JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC -XX:MaxGCPauseMillis=200}'
+    volumes:
+      - '../logs:/app/logs'
+      - './opentelemetry/opentelemetry-javaagent.jar:/opt/otel/opentelemetry-javaagent.jar'
+    networks:
+      - 'hex4j-network'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+      collector:
+        condition: service_started
+
+networks:
+  hex4j-network:
+    driver: bridge
